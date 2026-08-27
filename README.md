@@ -175,32 +175,39 @@ directory.
 ## Project Structure
 
 ```text
-codex-finish-notifier-vscode/
+codex-notifier-vscode/
 |- .eslintrc.cjs               # ESLint config
 |- .github/
 |  `- workflows/
 |     `- ci.yml                # GitHub Actions CI
 |- .gitignore                    # Git exclusions for local/dev artifacts
 |- .vscodeignore                 # VSIX packaging exclusions
+|- .vscode/
+|  |- launch.json                # Extension Development Host profile
+|  `- settings.json              # Local development settings
 |- AUTO_DEPLOY.md                # Release/deploy workflow documentation
 |- CHANGELOG.md                  # Version history
 |- CONTRIBUTING.md               # Contribution workflow and coding notes
 |- INSTALLATION.md               # End-user and dev installation guide
 |- LICENSE                       # MIT license
 |- README.md                     # Main documentation and feature overview
+|- SECURITY.md                   # Security policy and reporting guidance
 |- package-lock.json             # Locked npm dependency tree
-|- package.json                  # VS Code extension manifest/config schema
-|- extension.js                  # Core extension runtime (commands + watchers)
+|- package.json                  # VS Code extension manifest and settings
+|- extension.js                  # Core runtime, watchers, and notifications
+|- session-events.js             # Codex JSONL event parsing helpers
+|- toast-focus.js                # Toast protocol payload builder
+|- windows-toast-focus.ps1       # Windows native window focus helper
+|- windows-toast-focus.vbs       # Hidden Windows helper launcher
+|- codex-done.ps1                # Manual .codex-notify trigger helper
+|- notification1.wav             # Bundled error sound
+|- notification2.wav             # Bundled completion sound
 |- scripts/
-|  |- test-session-events.js     # Unit-style session event checks
+|  |- test-session-events.js     # Session event tests
+|  |- test-toast-focus.js        # Toast payload tests
 |  |- test-vsix.js               # VSIX smoke test
 |  `- validate-release.js        # Release validation checks
-|- session-events.js             # Session parsing helpers
-|- codex-done.ps1                # Helper trigger script for .codex-notify flow
-|- notification1.wav             # Bundled default sound (error)
-|- notification2.wav             # Bundled default sound (complete)
-`- .vscode/
-   `- launch.json                # Extension Development Host profile
+`- codex-notifier-private.vsix   # Locally built install artifact
 ```
 
 Notes:
@@ -208,6 +215,8 @@ Notes:
 - `.codex-notify` is runtime trigger data and not tracked in git.
 - `codex-notifier-private.vsix` is a generated install artifact, not a source
   file.
+- `.vscode-test/` is a generated VS Code test runtime and is not part of the
+  source tree or VSIX package.
 
 ## License
 
