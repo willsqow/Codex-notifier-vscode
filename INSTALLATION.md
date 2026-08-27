@@ -1,6 +1,6 @@
 ﻿# Installation & Setup Guide
 
-This guide explains how to install and run **Codex Finish Notifier**.
+This guide explains how to install and run **Codex Notifier**.
 
 ---
 
@@ -58,8 +58,17 @@ Direct Marketplace link:
 5. Run `Codex Notifier: Show Diagnostics` to confirm the package loaded and the
    extension sees the expected session sources.
 6. Leave the auto-detect defaults alone unless you need to tune false positives:
-   - `codexNotifier.codexLogMinEvents = 2`
-   - `codexNotifier.codexLogMinBurstMs = 250`
+
+### Windows Toast Click Focus
+
+To make a Windows toast return to its matching VS Code window, run `Codex Notifier: Enable Toast Window Focus (Windows)` once from the Command Palette. This registers a per-user `codex-notifier://` protocol that starts the bundled focus helper when a toast is clicked.
+
+The helper records the native target of each VS Code window and matches toast ownership by Codex session and turn. This also supports the same existing chat being open in multiple windows. If an exact target cannot be verified, it does nothing instead of focusing the wrong window.
+
+For safer auto-detection defaults:
+
+- `codexNotifier.codexLogMinEvents = 2`
+- `codexNotifier.codexLogMinBurstMs = 250`
 
 ---
 
@@ -113,6 +122,12 @@ Direct Marketplace link:
 
 - **Too many notifications**
   - Increase `codexNotifier.codexChatCooldownMs`.
+
+- **Toast opens the wrong window or does nothing**
+  - Run `Codex Notifier: Enable Toast Window Focus (Windows)` once.
+  - Reload or restart all VS Code windows after installing the VSIX.
+  - Test with a new prompt in the existing chat so the current turn gets a fresh window target.
+  - Use `Codex Notifier: Show Diagnostics` if the issue remains.
 
 - **Want a quick package check**
   - Run `npm run package:test`.

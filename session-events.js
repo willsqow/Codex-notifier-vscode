@@ -32,6 +32,33 @@ function parseTaskCompleteLine(line) {
   }
 }
 
+function cleanUserPrompt(text) {
+  const value = String(text || "").trim();
+  const requestMarker = value.match(/(?:^|\n)##\s*My request:\s*([\s\S]*)$/i);
+  return (requestMarker ? requestMarker[1] : value).trim();
+}
+
+function parseUserMessageLine(line) {
+  if (!line.includes('"user_message"') && !line.includes('"role":"user"')) return undefined;
+  try {
+    const event = JSON.parse(line);
+    if (event?.type === "event_msg" && event.payload?.type === "user_message") {
+      return typeof event.payload.message === "string" ? cleanUserPrompt(event.payload.message) : undefined;
+    }
+    if (event?.type === "response_item" && event.payload?.type === "message" && event.payload.role === "user") {
+      const text = event.payload.content
+        ?.filter((item) => item?.type === "input_text" && typeof item.text === "string")
+        .map((item) => item.text.trim())
+        .filter(Boolean)
+        .join(" ");
+      return text ? cleanUserPrompt(text) : undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function parseRequestUserInputLine(line) {
   if (!line.includes('"request_user_input"')) return undefined;
   try {
@@ -40,6 +67,21 @@ function parseRequestUserInputLine(line) {
       return undefined;
     }
     if (event.payload.name !== "request_user_input") {
+      return undefined;
+    }
+    let argumentsPayload;
+    try {
+      const rawArguments = event.payload.arguments;
+      argumentsPayload = typeof rawArguments === "string"
+        ? JSON.parse(rawArguments || "{}")
+        : rawArguments || {};
+    } catch {
+      return undefined;
+    }
+    const questions = argumentsPayload?.questions;
+    if (!Array.isArray(questions) || !questions.some((question) => (
+      question && typeof question.question === "string" && question.question.trim()
+    ))) {
       return undefined;
     }
     const turnId = event.payload.internal_chat_message_metadata_passthrough?.turn_id
@@ -86,7 +128,9 @@ function isHistoricalSessionRequest(request, sessionInfo, historyNotBeforeMs) {
 module.exports = {
   isHistoricalSessionCompletion,
   isHistoricalSessionRequest,
+  parseUserMessageLine,
   parseRequestUserInputLine,
+  cleanUserPrompt,
   parseTaskCompleteLine,
   parseTimestampMs
 };

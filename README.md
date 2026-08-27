@@ -36,6 +36,8 @@ A lightweight VS Code extension that notifies you when Codex responses finish or
 - Prompt detection when Codex pauses for `request_user_input`.
 - Optional document-based idle detection fallback.
 - Quiet mode or banner mode for completion and prompt notifications.
+- Windows toast click focus for the exact VS Code window that owns the prompt,
+  including multiple windows using the same existing Codex chat.
 - Manual trigger support through `.codex-notify` and `codex-done.ps1`.
 - Remote SSH workspace support: notifications and sounds run locally while relative trigger files are watched on the remote host.
 
@@ -48,7 +50,6 @@ A lightweight VS Code extension that notifies you when Codex responses finish or
 | `Codex Notifier: Test Sound` | Test completion sound + UI behavior |
 | `Codex Notifier: Toggle Auto Notify` | Enable/disable log-based auto detection |
 | `Codex Notifier: Show Diagnostics` | Show runtime diagnostics snapshot |
-| `Codex Notifier: Debug Snapshot` | Print active docs/editors to output channel |
 
 ## Installation
 
@@ -79,6 +80,10 @@ See [INSTALLATION.md](./INSTALLATION.md) for VSIX steps.
 4. Ask Codex something and wait for either response completion or `request_user_input` notification.
 5. If behavior does not match the settings you just changed, check whether this workspace has its own `.vscode/settings.json` overrides for `codexNotifier.*`.
 
+### Windows Toast Click Focus
+
+On Windows, run `Codex Notifier: Enable Toast Window Focus (Windows)` once. The extension records the native window target when each VS Code window is focused. Each notification stores its target by Codex session and turn, so clicking a toast returns to the window that sent that prompt, even when several windows use the same existing chat. The helper is fail-safe: if it cannot identify the exact window, it does nothing instead of focusing a different window.
+
 ## How It Works
 
 1. On activation, the extension starts the Codex session completion detector and the manual file watcher.
@@ -91,6 +96,7 @@ See [INSTALLATION.md](./INSTALLATION.md) for VSIX steps.
    - Any other non-empty content -> complete notification
 7. Auto mode tails Codex session JSONL files and reacts to authoritative `task_complete` and `request_user_input` events.
 8. Prompt notifications use the same `codexNotifier.completionUseBanner` setting as completion notifications.
+9. On Windows, toast activation uses a per-user `codex-notifier://` protocol and a hidden helper. Native HWND mappings and per-turn ownership prevent cross-window redirects and duplicate focus actions.
 
 ### Remote SSH Workspaces
 
@@ -153,6 +159,7 @@ directory.
   - run `Codex Notifier: Test Sound`
   - verify the package loads and the commands work
   - test once with VS Code focused and once with VS Code unfocused to confirm banner or quiet mode plus system toast behavior
+  - open two or more VS Code windows, use existing chats in each, prompt them, and confirm each toast returns to its originating window
 - Manual remote live test:
   - open a Remote SSH VS Code window
   - verify notifications and sound on the local UI machine
@@ -193,7 +200,7 @@ codex-finish-notifier-vscode/
 |- notification1.wav             # Bundled default sound (error)
 |- notification2.wav             # Bundled default sound (complete)
 `- .vscode/
-   `- launch.json                # Extension Development Host debug profile
+   `- launch.json                # Extension Development Host profile
 ```
 
 Notes:

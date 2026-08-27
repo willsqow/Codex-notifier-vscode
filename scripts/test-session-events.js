@@ -5,6 +5,8 @@ const {
   isHistoricalSessionCompletion,
   isHistoricalSessionRequest,
   parseRequestUserInputLine,
+  cleanUserPrompt,
+  parseUserMessageLine,
   parseTaskCompleteLine,
   parseTimestampMs
 } = require("../session-events");
@@ -21,7 +23,11 @@ function completionLine(turnId, completedAt) {
   });
 }
 
-function requestUserInputLine(turnId, callId, requestedAt) {
+function requestUserInputLine(turnId, callId, requestedAt, questions = [{
+  header: "choice",
+  question: "Pick one",
+  options: ["One", "Two"]
+}]) {
   return JSON.stringify({
     timestamp: requestedAt,
     type: "response_item",
@@ -29,7 +35,7 @@ function requestUserInputLine(turnId, callId, requestedAt) {
       type: "function_call",
       id: "fc_test",
       name: "request_user_input",
-      arguments: "{\"questions\":[]}",
+      arguments: JSON.stringify({ questions }),
       call_id: callId,
       internal_chat_message_metadata_passthrough: {
         turn_id: turnId
@@ -102,6 +108,43 @@ assert.strictEqual(
 );
 
 assert.strictEqual(
+  parseRequestUserInputLine(requestUserInputLine(
+    "empty-prompt-turn",
+    "call_empty_prompt",
+    "2026-07-30T23:05:24.159Z",
+    []
+  )),
+  undefined,
+  "an empty request_user_input payload must not notify"
+);
+
+const objectArgumentsLine = JSON.parse(requestUserInputLine(
+  "object-prompt-turn",
+  "call_object_prompt",
+  "2026-07-30T23:05:24.159Z"
+));
+objectArgumentsLine.payload.arguments = {
+  questions: [{ question: "Pick one" }]
+};
+assert.strictEqual(
+  parseRequestUserInputLine(JSON.stringify(objectArgumentsLine)).turnId,
+  "object-prompt-turn",
+  "an object-form arguments payload must remain supported"
+);
+
+const malformedQuestionLine = JSON.parse(requestUserInputLine(
+  "malformed-prompt-turn",
+  "call_malformed_prompt",
+  "2026-07-30T23:05:24.159Z"
+));
+malformedQuestionLine.payload.arguments = JSON.stringify({ questions: [{ header: "missing-text" }] });
+assert.strictEqual(
+  parseRequestUserInputLine(JSON.stringify(malformedQuestionLine)),
+  undefined,
+  "a request without visible question text must not notify"
+);
+
+assert.strictEqual(
   isHistoricalSessionCompletion({ turnId: "missing-time" }, forkedSession, watcherStartedAtMs),
   true,
   "an undated completion in the initial session snapshot must be ignored"
@@ -113,6 +156,28 @@ assert.strictEqual(
 );
 
 assert.strictEqual(parseTimestampMs("2026-07-30T23:05:22.986Z"), forkedSession.createdAtMs);
+assert.strictEqual(
+  parseUserMessageLine(JSON.stringify({
+    type: "event_msg",
+    payload: { type: "user_message", message: "  test prompt  " }
+  })),
+  "test prompt"
+);
+assert.strictEqual(
+  parseUserMessageLine(JSON.stringify({
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "response prompt" }]
+    }
+  })),
+  "response prompt"
+);
+assert.strictEqual(
+  cleanUserPrompt("# Context from my IDE setup:\n## Active file: extension.js\n## My request:\nrebuild"),
+  "rebuild"
+);
 assert.strictEqual(parseTimestampMs(1785452722), 1785452722000);
 assert.strictEqual(parseTaskCompleteLine('{"type":"event_msg","payload":{"type":"token_count"}}'), undefined);
 assert.strictEqual(

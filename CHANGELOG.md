@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in Windows toast click focus for the exact VS Code window that owns a Codex prompt.
+- Added native per-window HWND registration and a hidden `codex-notifier://` activation helper so clicking a toast restores an existing VS Code window without opening a new one or flashing a PowerShell window.
+- Added per-session and per-turn ownership tracking. Multiple VS Code windows can now use the same existing Codex chat while each completion toast keeps its own originating window target.
+- Added atomic notification deduplication across extension hosts so opening multiple VS Code windows does not multiply sounds or system toasts for one Codex event.
+- Kept the focus helper fail-safe. It only focuses a verified Code window and does nothing when the target cannot be identified exactly.
+- Improved toast content to show a short, cleaned prompt summary so users can identify which Codex request completed.
+- Fixed existing and resumed chats being ignored by removing the old recent-session limit and processing eligible Codex session files consistently.
+- Removed routine debug output, the debug snapshot command, and the public debug setting from the release build. Explicit diagnostics remain available through `Codex Notifier: Show Diagnostics`.
+- Thanks to [melan0802](https://github.com/melan0802) for reporting [issue #5](https://github.com/zis3c/Codex-notifier-vscode/issues/5) and requesting that notification clicks return to the correct VS Code window when working across multiple windows. This release addresses that request, including existing chats and repeated prompts in the same chat.
+
 All notable changes to this project will be documented in this file.
 
 ## [0.1.10] - 2026-08-18
@@ -58,3 +70,4 @@ All notable changes to this project will be documented in this file.
   - `npm run check`
   - `npm run release:check`
   - `npm run lint` (mapped to `check`)
+- Improved toast wording so completion, input requests, and errors clearly explain the Codex state and click action.

@@ -27,7 +27,10 @@ function main() {
     "extension.vsixmanifest",
     "extension/package.json",
     "extension/extension.js",
-    "extension/session-events.js"
+    "extension/session-events.js",
+    "extension/toast-focus.js",
+    "extension/windows-toast-focus.ps1",
+    "extension/windows-toast-focus.vbs"
   ];
 
   for (const entry of required) {

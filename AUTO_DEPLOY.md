@@ -14,7 +14,7 @@ npm run ci
 1. Build VSIX:
 
 ```bash
-npm exec --yes @vscode/vsce package -- --out codex-notifier-private.vsix
+npm exec --yes -- @vscode/vsce package --out codex-notifier-private.vsix
 ```
 
 1. Commit and push source to GitHub.
@@ -47,3 +47,5 @@ You can automate with GitHub Actions:
 - Rebuild the VSIX after any code, manifest, or packaging change that you want
   reflected in the installable file.
 - If you only change docs, a VSIX rebuild is not required.
+- Run `npm run ci` before sharing a release artifact. It validates source,
+  lint, session parsing, toast focus behavior, and VSIX contents.

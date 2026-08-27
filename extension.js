@@ -1,14 +1,17 @@
 const vscode = require("vscode");
 const fs = require("fs");
+const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
 const {
   isHistoricalSessionCompletion,
   isHistoricalSessionRequest,
+  parseUserMessageLine,
   parseRequestUserInputLine,
   parseTaskCompleteLine
 } = require("./session-events");
+const { buildToastFocusLaunchUri } = require("./toast-focus");
 const extensionVersion = require("./package.json").version;
 
 /**
@@ -21,7 +24,6 @@ let codexDocWatcher = null;
 let codexPoller = null;
 let codexState = new Map();
 let lastCodexNotifyAt = 0;
-let debugDocWatcher = null;
 let output = null;
 let codexLogPoller = null;
 let codexLogOffsets = new Map();
@@ -35,6 +37,30 @@ let codexInputRequestTurnIds = new Set();
 let codexSessionInfo = new Map();
 let statusItem = null;
 let statusTimer = null;
+
+function claimNotification(key) {
+  const digest = crypto.createHash("sha256").update(String(key)).digest("hex");
+  const lockPath = path.join(os.tmpdir(), `codex-notifier-${digest}.lock`);
+  const staleMs = 24 * 60 * 60 * 1000;
+
+  try {
+    const fd = fs.openSync(lockPath, "wx");
+    fs.writeFileSync(fd, String(Date.now()), "utf8");
+    fs.closeSync(fd);
+    return true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") return true;
+    try {
+      if (Date.now() - fs.statSync(lockPath).mtimeMs > staleMs) {
+        fs.unlinkSync(lockPath);
+        return claimNotification(key);
+      }
+    } catch {
+      return true;
+    }
+    return false;
+  }
+}
 
 // Small helper for readable timestamps in diagnostics output.
 function fmtTs(ms) {
@@ -66,7 +92,7 @@ function getConfig() {
   return vscode.workspace.getConfiguration("codexNotifier");
 }
 
-// Lazily create output channel used for debug/diagnostic logs.
+// Lazily create output channel used for the explicit diagnostics command.
 function getOutput() {
   if (!output) {
     output = vscode.window.createOutputChannel("Codex Notifier");
@@ -74,13 +100,8 @@ function getOutput() {
   return output;
 }
 
-// Debug logger guarded by `codexNotifier.debug` setting.
-function logDebug(message) {
-  const cfg = getConfig();
-  if (!cfg.get("debug", false)) return;
-  const ts = new Date().toISOString();
-  getOutput().appendLine(`[${ts}] ${message}`);
-}
+// Retained as a no-op for internal call sites; routine runtime logging stays quiet.
+function logDebug() {}
 
 // Quiet UI feedback (status bar), used instead of intrusive info banners.
 function showQuickStatus(message, kind) {
@@ -106,20 +127,28 @@ function showQuickStatus(message, kind) {
 }
 
 // Optional Windows toast helper (kept for compatibility, currently quiet mode uses status bar).
-function showWindowsToast(title, message) {
+function showWindowsToast(title, message, launchUri = "") {
   return new Promise((resolve) => {
     if (process.platform !== "win32") {
       resolve();
       return;
     }
 
-    const esc = (s) => String(s).replace(/'/g, "''");
-    const t = esc(title);
-    const m = esc(message);
+    const escXml = (s) => String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+    const actionXml = launchUri
+      ? `<actions><action content="Open Codex" activationType="protocol" arguments="${escXml(launchUri)}"/></actions>`
+      : "";
+    const xml = `<toast${launchUri ? ` activationType="protocol" launch="${escXml(launchUri)}"` : ""}><visual><binding template="ToastGeneric"><text>${escXml(title)}</text><text>${escXml(message)}</text></binding></visual>${actionXml}</toast>`;
+    const escapedXml = xml.replace(/'/g, "''");
     const script = [
       "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;",
       "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;",
-      `$xml = '<toast><visual><binding template="ToastGeneric"><text>${t}</text><text>${m}</text></binding></visual></toast>';`,
+      `$xml = '${escapedXml}';`,
       "$doc = New-Object Windows.Data.Xml.Dom.XmlDocument;",
       "$doc.LoadXml($xml);",
       "$toast = [Windows.UI.Notifications.ToastNotification]::new($doc);",
@@ -132,10 +161,10 @@ function showWindowsToast(title, message) {
 }
 
 // Cross-platform system notification helper for when VS Code is not focused.
-function showSystemNotification(title, message) {
+function showSystemNotification(title, message, launchUri = "") {
   return new Promise((resolve) => {
     if (process.platform === "win32") {
-      void showWindowsToast(title, message).finally(resolve);
+      void showWindowsToast(title, message, launchUri).finally(resolve);
       return;
     }
 
@@ -154,6 +183,219 @@ function showSystemNotification(title, message) {
     }
 
     resolve();
+  });
+}
+
+function getToastFocusTarget(sessionCwd = "") {
+  const workspacePath = sessionCwd || vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || "";
+  const workspaceName = sessionCwd
+    ? path.basename(sessionCwd)
+    : vscode.workspace.name || vscode.workspace.workspaceFolders?.[0]?.name || "";
+  // For an automatic session notification, sessionCwd is the target signal.
+  // Do not let the extension host that won dedupe override it with its PID.
+  const windowPid = sessionCwd ? 0 : process.ppid;
+  const activeFileName = vscode.window.activeTextEditor
+    ? path.basename(vscode.window.activeTextEditor.document.fileName || "")
+    : "";
+  return { workspaceName, workspacePath, activeFileName, windowSessionId: getWindowSessionId(), windowPid };
+}
+
+function isWindowsWindowFocused() {
+  return new Promise((resolve) => {
+    if (process.platform !== "win32") {
+      resolve(vscode.window.state.focused);
+      return;
+    }
+
+    const script = "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ForegroundWindow { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid); public static uint GetPid() { uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid); return pid; } }'; [ForegroundWindow]::GetPid()";
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], (error, stdout) => {
+      if (error) {
+        resolve(vscode.window.state.focused);
+        return;
+      }
+      const foregroundPid = Number(String(stdout || "").trim());
+      resolve(Number.isInteger(foregroundPid) && foregroundPid === process.ppid);
+    });
+  });
+}
+
+function registerFocusedWindowsToastTarget() {
+  if (process.platform !== "win32" || !getWindowSessionId()) return;
+  recordWindowFocusHistory();
+  const windowSessionId = getWindowSessionId();
+  const sessionId = windowSessionId.replace(/[^A-Za-z0-9_-]/g, "_");
+  const handlePath = path.join(os.tmpdir(), `codex-notifier-window-${sessionId}.handle`);
+  const script = "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ForegroundWindowHandle { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); }'; [ForegroundWindowHandle]::GetForegroundWindow().ToInt64()";
+  execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], (error, stdout, stderr) => {
+    if (error) {
+      logDebug(`window registration failed session=${windowSessionId} error=${String(stderr || error.message || error).trim()}`);
+      return;
+    }
+    const handle = Number(String(stdout || "").trim());
+    if (Number.isSafeInteger(handle) && handle > 0) {
+      try {
+        fs.writeFileSync(handlePath, String(handle), "utf8");
+        logDebug(`window registered session=${windowSessionId} handle=${handle}`);
+      } catch {
+        logDebug(`window registration write failed session=${windowSessionId}`);
+      }
+    } else {
+      logDebug(`window registration returned invalid handle session=${windowSessionId} output=${String(stdout || "").trim()}`);
+    }
+  });
+}
+
+function getWindowFocusHistoryPath() {
+  return path.join(os.tmpdir(), "codex-notifier-window-focus-history.jsonl");
+}
+
+function recordWindowFocusHistory() {
+  if (process.platform !== "win32" || !getWindowSessionId() || !vscode.window.state.focused) return;
+  try {
+    const historyPath = getWindowFocusHistoryPath();
+    const entries = fs.existsSync(historyPath)
+      ? fs.readFileSync(historyPath, "utf8").split(/\r?\n/).filter(Boolean).slice(-99)
+      : [];
+    entries.push(JSON.stringify({ at: Date.now(), windowSessionId: getWindowSessionId() }));
+    fs.writeFileSync(historyPath, `${entries.join("\n")}\n`, "utf8");
+  } catch {
+    // Focus history is best effort; direct owner registration remains available.
+  }
+}
+
+function getFocusedWindowAt(timestampMs) {
+  if (!Number.isFinite(timestampMs)) return "";
+  try {
+    const lines = fs.readFileSync(getWindowFocusHistoryPath(), "utf8").split(/\r?\n/).filter(Boolean);
+    let owner = "";
+    let latestAt = -Infinity;
+    for (const line of lines) {
+      const entry = JSON.parse(line);
+      if (Number.isFinite(entry.at) && entry.at <= timestampMs && entry.at > latestAt) {
+        latestAt = entry.at;
+        owner = String(entry.windowSessionId || "");
+      }
+    }
+    return owner;
+  } catch {
+    return "";
+  }
+}
+
+function getSessionWindowOwnerPath(sessionId) {
+  const safeSessionId = String(sessionId || "").replace(/[^A-Za-z0-9_-]/g, "_");
+  return safeSessionId ? path.join(os.tmpdir(), `codex-notifier-session-${safeSessionId}.owner`) : "";
+}
+
+function getSessionTurnOwnerPath(sessionId, turnId) {
+  const safeSessionId = String(sessionId || "").replace(/[^A-Za-z0-9_-]/g, "_");
+  const safeTurnId = String(turnId || "").replace(/[^A-Za-z0-9_-]/g, "_");
+  return safeSessionId && safeTurnId
+    ? path.join(os.tmpdir(), `codex-notifier-session-${safeSessionId}-turn-${safeTurnId}.owner`)
+    : "";
+}
+
+function getWindowSessionId() {
+  return normalizeWindowSessionId(vscode.env.sessionId);
+}
+
+function normalizeWindowSessionId(value) {
+  const raw = String(value || "");
+  const match = raw.match(/^([0-9a-f-]{36})\d{13}$/i);
+  return match ? match[1] : raw;
+}
+
+function recordFocusedSessionOwner(sessionId, ownerWindowSessionId = "", eventTimestampMs = 0, turnId = "") {
+  if (process.platform !== "win32") return;
+  const ownerPath = getSessionTurnOwnerPath(sessionId, turnId) || getSessionWindowOwnerPath(sessionId);
+  const owner = ownerWindowSessionId || getWindowSessionId();
+  if (!ownerPath || !owner) return;
+  try {
+    let previousTimestamp = -Infinity;
+    if (fs.existsSync(ownerPath)) {
+      try {
+        const previous = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+        previousTimestamp = Number(previous.eventTimestampMs);
+      } catch {
+        // Legacy plain-text owner files have no timestamp and can be replaced.
+      }
+    }
+    if (Number.isFinite(eventTimestampMs) && Number.isFinite(previousTimestamp) && previousTimestamp >= eventTimestampMs) {
+      return;
+    }
+    const ownerRecord = JSON.stringify({ windowSessionId: String(owner), eventTimestampMs: Number(eventTimestampMs) || Date.now() });
+    fs.writeFileSync(ownerPath, ownerRecord, "utf8");
+    logDebug(`session owner recorded session=${sessionId} owner=${owner} event=${eventTimestampMs || "now"}`);
+  } catch {
+    // Ownership is best effort; workspace matching remains as a fallback.
+  }
+}
+
+function getSessionWindowOwner(sessionId, turnId = "") {
+  const ownerPath = getSessionTurnOwnerPath(sessionId, turnId) || getSessionWindowOwnerPath(sessionId);
+  if (!ownerPath) return "";
+  try {
+    const raw = fs.readFileSync(ownerPath, "utf8").trim();
+    try {
+      return normalizeWindowSessionId(JSON.parse(raw).windowSessionId);
+    } catch {
+      return normalizeWindowSessionId(raw);
+    }
+  } catch {
+    return "";
+  }
+}
+
+function getUserMessageTurnId(line) {
+  try {
+    const event = JSON.parse(line);
+    if (event?.type === "event_msg" && event.payload?.type === "user_message") {
+      return String(event.payload.turn_id || "");
+    }
+    if (event?.type === "response_item" && event.payload?.type === "message" && event.payload.role === "user") {
+      return String(event.payload.internal_chat_message_metadata_passthrough?.turn_id || event.payload.turn_id || "");
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function isCurrentSessionUserMessage(line, historyNotBeforeMs) {
+  if (!Number.isFinite(historyNotBeforeMs)) return true;
+  try {
+    const event = JSON.parse(line);
+    const timestamp = Date.parse(event?.timestamp || "");
+    return Number.isFinite(timestamp) && timestamp >= historyNotBeforeMs;
+  } catch {
+    return false;
+  }
+}
+
+function installWindowsToastFocusHelper(context) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== "win32") {
+      reject(new Error("Toast window focus is only available on Windows."));
+      return;
+    }
+
+    const wrapperPath = path.join(context.extensionPath, "windows-toast-focus.vbs").replace(/'/g, "''");
+    const wscriptPath = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe");
+    const commandValue = `"${wscriptPath}" "${wrapperPath}" "%1"`;
+    const escapedCommand = commandValue.replace(/'/g, "''");
+    const script = [
+      "$key = 'HKCU:\\Software\\Classes\\codex-notifier';",
+      "New-Item -Path $key -Force | Out-Null;",
+      "Set-Item -Path $key -Value 'URL:Codex Notifier Toast Focus Protocol';",
+      "New-ItemProperty -Path $key -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null;",
+      "New-Item -Path ($key + '\\shell\\open\\command') -Force | Out-Null;",
+      `Set-Item -Path ($key + '\\shell\\open\\command') -Value '${escapedCommand}';`
+    ].join(" ");
+
+    execFile("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
   });
 }
 
@@ -261,23 +503,52 @@ async function notify(kind, message, _options = {}) {
   const completionUseBanner = config.get("completionUseBanner", false);
   const toastWhenUnfocused = config.get("toastWhenUnfocused", true);
   const enableSound = config.get("enableSound", true);
-  const isFocused = vscode.window.state.focused;
+  const isFocused = await isWindowsWindowFocused();
   const shouldSystemNotify = enablePopup && toastWhenUnfocused && !isFocused;
+  logDebug(`notify state focused=${isFocused} systemToast=${shouldSystemNotify} key=${_options.dedupeKey || "manual"}`);
+
+  // Let an unfocused window win the shared dedupe lock so it can show the
+  // Windows toast. A focused window should not consume that event with a
+  // banner while another window is in the background.
+  if (_options.dedupeKey) {
+    const workspacePriorityDelay = _options.workspaceMatch === false ? 500 : 0;
+    if (!shouldSystemNotify || workspacePriorityDelay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.max(150, workspacePriorityDelay)));
+    }
+    if (!claimNotification(_options.dedupeKey)) {
+      logDebug(`duplicate notification suppressed key=${_options.dedupeKey}`);
+      return;
+    }
+  }
+
   const volumeRaw = config.get("volume", 1);
   const volume = Number.isFinite(volumeRaw) ? Math.max(0, Math.min(1, volumeRaw)) : 1;
   const completeSoundPath = config.get("completeSoundPath", "");
   const errorSoundPath = config.get("errorSoundPath", "");
+  const focusExistingWindowOnToast = config.get("focusExistingWindowOnToast", false);
+  if (focusExistingWindowOnToast) registerFocusedWindowsToastTarget();
+  const notificationTitle = kind === "error"
+    ? "Codex task error"
+    : _options.waitingForInput || message.startsWith("Codex is waiting") || message.startsWith("Needs your input")
+      ? "Codex needs your input"
+      : "Codex task complete";
+  const launchUri = focusExistingWindowOnToast
+    ? buildToastFocusLaunchUri({
+      ...getToastFocusTarget(_options.sessionCwd || ""),
+      windowSessionId: _options.toastWindowSessionId || getWindowSessionId()
+    })
+    : "";
 
   if (enablePopup) {
     if (kind === "error") {
       if (shouldSystemNotify) {
-        await showSystemNotification("Codex Notifier", message);
+        await showSystemNotification(notificationTitle, _options.toastMessage || message, launchUri);
       } else {
         vscode.window.showErrorMessage(message);
       }
     } else {
       if (shouldSystemNotify) {
-        await showSystemNotification("Codex Notifier", message);
+        await showSystemNotification(notificationTitle, _options.toastMessage || message, launchUri);
       } else if (completionUseBanner) {
         vscode.window.showInformationMessage(message);
       } else {
@@ -324,10 +595,6 @@ function stopCodexDocumentWatcher() {
     codexPoller = null;
   }
   codexState.clear();
-  if (debugDocWatcher) {
-    debugDocWatcher.dispose();
-    debugDocWatcher = null;
-  }
 }
 
 // Stop Codex session monitoring and reset tail state.
@@ -414,11 +681,11 @@ function localDirectoriesAt(root) {
 function findLocalCodexSessionFiles() {
   const candidates = [];
   for (const root of getLocalSessionRoots()) {
-    for (const year of localDirectoriesAt(root).slice(-2)) {
+    for (const year of localDirectoriesAt(root)) {
       const yearDir = path.join(root, year);
-      for (const month of localDirectoriesAt(yearDir).slice(-2)) {
+      for (const month of localDirectoriesAt(yearDir)) {
         const monthDir = path.join(yearDir, month);
-        for (const day of localDirectoriesAt(monthDir).slice(-3)) {
+        for (const day of localDirectoriesAt(monthDir)) {
           const dayDir = path.join(monthDir, day);
           let entries = [];
           try {
@@ -462,11 +729,11 @@ async function remoteDirectoriesAt(root) {
 async function findRemoteCodexSessionFiles() {
   const candidates = [];
   for (const root of getRemoteSessionRoots()) {
-    for (const year of (await remoteDirectoriesAt(root)).slice(-2)) {
+    for (const year of (await remoteDirectoriesAt(root))) {
       const yearDir = vscode.Uri.joinPath(root, year);
-      for (const month of (await remoteDirectoriesAt(yearDir)).slice(-2)) {
+      for (const month of (await remoteDirectoriesAt(yearDir))) {
         const monthDir = vscode.Uri.joinPath(yearDir, month);
-        for (const day of (await remoteDirectoriesAt(monthDir)).slice(-3)) {
+        for (const day of (await remoteDirectoriesAt(monthDir))) {
           const dayDir = vscode.Uri.joinPath(monthDir, day);
           let entries = [];
           try {
@@ -498,7 +765,7 @@ async function findRemoteCodexSessionFiles() {
 
 async function findAllCodexSessionFiles() {
   const now = Date.now();
-  if (now - codexLogFilesCacheAt < 1000) return codexLogFilesCache;
+  if (now - codexLogFilesCacheAt < 5000) return codexLogFilesCache;
 
   const remoteRoots = getRemoteSessionRoots();
   const candidates = remoteRoots.length > 0
@@ -506,9 +773,10 @@ async function findAllCodexSessionFiles() {
     : findLocalCodexSessionFiles();
 
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  codexLogFilesCache = candidates
-    .filter((candidate) => now - candidate.mtimeMs <= 1000 * 60 * 60 * 24 * 2)
-    .slice(0, 12);
+  // Existing chats can be resumed after many newer sessions were created.
+  // Do not drop old sessions by count or file age. Metadata loading remains
+  // cheap because getSessionInfo reads only each file's first line.
+  codexLogFilesCache = candidates;
   codexLogFilesCacheAt = now;
   return codexLogFilesCache;
 }
@@ -595,21 +863,54 @@ function classifySessionMetadata(metadata) {
   return { eligible: true, reason: "top-level-vscode-session" };
 }
 
+function parseSessionPrompt(text) {
+  let latestPrompt = "";
+  for (const line of text.split(/\r?\n/)) {
+    const prompt = parseUserMessageLine(line);
+    if (prompt) latestPrompt = prompt;
+  }
+  return latestPrompt;
+}
+
+async function getLatestSessionPrompt(source, size, fallback = "") {
+  const tailSize = 256 * 1024;
+  const text = await readCodexSessionChunk(source, Math.max(0, size - tailSize), size);
+  return parseSessionPrompt(text) || fallback;
+}
+
+function formatSessionNotification(kind, prompt, waitingForInput = false) {
+  const cleanPrompt = String(prompt || "").replace(/\s+/g, " ").trim();
+  const shortPrompt = cleanPrompt.length > 120 ? `${cleanPrompt.slice(0, 117).trimEnd()}...` : cleanPrompt;
+  if (!shortPrompt) {
+    return waitingForInput
+      ? "Codex is waiting for your input. Click to return to this conversation."
+      : kind === "error"
+        ? "Codex could not complete the task. Click to return to this conversation."
+        : "Codex has finished responding. Click to return to this conversation.";
+  }
+  const prefix = waitingForInput ? "Needs your input" : kind === "error" ? "Task error" : "Finished";
+  return `${prefix}: ${shortPrompt}`;
+}
+
 async function getSessionInfo(source, size) {
   const cached = codexSessionInfo.get(source.key);
   if (cached) return cached;
 
-  const text = await readCodexSessionChunk(source, 0, size);
+  // Session metadata is stored on the first line. Avoid loading large old
+  // transcripts just to decide whether a session is eligible.
+  const text = await readCodexSessionChunk(source, 0, Math.min(size, 64 * 1024));
   const metadata = parseSessionMetadata(text);
   if (!metadata) return undefined;
 
   const classification = classifySessionMetadata(metadata);
   const info = {
     ...classification,
+    sessionId: metadata.session_id || metadata.id || "",
     cwd: metadata.cwd || "",
     source: typeof metadata.source === "string" ? metadata.source : "subagent",
     threadSource: metadata.thread_source || "",
     forkedFromId: metadata.forked_from_id || "",
+    prompt: parseSessionPrompt(text),
     createdAtMs: Date.parse(metadata.timestamp || "")
   };
   codexSessionInfo.set(source.key, info);
@@ -619,15 +920,49 @@ async function getSessionInfo(source, size) {
   return info;
 }
 
-async function processCodexSessionChunk(chunk, sourceKey, sessionInfo, historyNotBeforeMs) {
+function normalizeWorkspacePath(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/([a-zA-Z]:)/, "$1")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function isSessionInCurrentWorkspace(sessionInfo) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (folders.length === 0 || !sessionInfo?.cwd) return true;
+
+  const sessionPath = normalizeWorkspacePath(sessionInfo.cwd);
+  return folders.some((folder) => {
+    const folderPath = normalizeWorkspacePath(folder.uri.fsPath || folder.uri.path);
+    return sessionPath === folderPath || sessionPath.startsWith(`${folderPath}/`);
+  });
+}
+
+async function processCodexSessionChunk(chunk, source, sessionInfo, sourceSize, historyNotBeforeMs, workspaceMatch) {
+  const sourceKey = source.key;
   const combined = (codexLogRemainders.get(sourceKey) || "") + chunk;
   const lines = combined.split(/\r?\n/);
   codexLogRemainders.set(sourceKey, lines.pop() || "");
 
   for (const line of lines) {
+    const userMessage = parseUserMessageLine(line);
+    if (userMessage && isCurrentSessionUserMessage(line, historyNotBeforeMs)) {
+      let ownerWindowSessionId = "";
+      let eventTimestampMs = 0;
+      const userTurnId = getUserMessageTurnId(line);
+      try {
+        eventTimestampMs = Date.parse(JSON.parse(line)?.timestamp || "");
+        ownerWindowSessionId = getFocusedWindowAt(eventTimestampMs);
+      } catch {
+        ownerWindowSessionId = "";
+      }
+      recordFocusedSessionOwner(sessionInfo.sessionId, ownerWindowSessionId, eventTimestampMs, userTurnId);
+    }
     const request = parseRequestUserInputLine(line);
     if (request) {
-      const requestKey = `${sourceKey}:${request.turnId || request.callId}`;
+      const sessionKey = sessionInfo.sessionId || sourceKey;
+      const requestKey = `${sessionKey}:${request.turnId || request.callId}`;
       if (codexInputRequestTurnIds.has(requestKey)) continue;
       if (isHistoricalSessionRequest(request, sessionInfo, historyNotBeforeMs)) {
         logDebug(
@@ -638,7 +973,17 @@ async function processCodexSessionChunk(chunk, sourceKey, sessionInfo, historyNo
       codexInputRequestTurnIds.add(requestKey);
       lastCodexNotifyAt = Date.now();
       logDebug(`request_user_input source=${sourceKey} turnId=${request.turnId} callId=${request.callId || "n/a"}`);
-      await notify("complete", "Codex: needs your input", { mode: "auto", turnId: request.turnId });
+      sessionInfo.prompt = await getLatestSessionPrompt(source, sourceSize, sessionInfo.prompt);
+      await notify("complete", "Codex is waiting for your input.", {
+        mode: "auto",
+        turnId: request.turnId,
+        sessionCwd: sessionInfo.cwd,
+        toastMessage: formatSessionNotification("complete", sessionInfo.prompt, true),
+        waitingForInput: true,
+        toastWindowSessionId: getSessionWindowOwner(sessionInfo.sessionId, request.turnId),
+        workspaceMatch,
+        dedupeKey: `input:${requestKey}`
+      });
       continue;
     }
 
@@ -654,7 +999,16 @@ async function processCodexSessionChunk(chunk, sourceKey, sessionInfo, historyNo
     codexCompletedTurnIds.add(turnId);
     lastCodexNotifyAt = Date.now();
     logDebug(`task_complete source=${sourceKey} turnId=${turnId}`);
-    await notify("complete", "Codex: response complete", { mode: "auto", turnId });
+    sessionInfo.prompt = await getLatestSessionPrompt(source, sourceSize, sessionInfo.prompt);
+    await notify("complete", "Codex has finished responding.", {
+        mode: "auto",
+        turnId,
+        sessionCwd: sessionInfo.cwd,
+        toastMessage: formatSessionNotification("complete", sessionInfo.prompt),
+        toastWindowSessionId: getSessionWindowOwner(sessionInfo.sessionId, turnId),
+        workspaceMatch,
+        dedupeKey: `complete:${sessionInfo.sessionId || sourceKey}:${turnId}`
+    });
   }
 }
 
@@ -700,11 +1054,24 @@ function startCodexLogWatcher() {
         }
       }
 
+      const sessionSources = [];
       for (const source of files) {
         try {
           const stat = await getCodexSessionStat(source);
           const sessionInfo = await getSessionInfo(source, stat.size);
           if (!sessionInfo?.eligible) continue;
+          const workspaceMatch = isSessionInCurrentWorkspace(sessionInfo);
+          sessionSources.push({ source, stat, sessionInfo, workspaceMatch });
+        } catch (error) {
+          logDebug(`session read failed source=${source.key} error=${String(error)}`);
+        }
+      }
+
+      // Codex does not expose the selected chat session to third-party
+      // extensions. Monitor all eligible sessions and use the
+      // cross-process session_id + turn_id lock to emit one notification.
+      for (const { source, stat, sessionInfo, workspaceMatch } of sessionSources) {
+        try {
 
           let offset = codexLogOffsets.get(source.key);
           let historyNotBeforeMs;
@@ -729,7 +1096,7 @@ function startCodexLogWatcher() {
 
           const chunk = await readCodexSessionChunk(source, offset, stat.size);
           codexLogOffsets.set(source.key, stat.size);
-          await processCodexSessionChunk(chunk, source.key, sessionInfo, historyNotBeforeMs);
+          await processCodexSessionChunk(chunk, source, sessionInfo, stat.size, historyNotBeforeMs, workspaceMatch);
         } catch (error) {
           logDebug(`session read failed source=${source.key} error=${String(error)}`);
         }
@@ -754,6 +1121,7 @@ function startCodexDocumentWatcher(context) {
 
   const config = getConfig();
   const enabled = config.get("monitorCodexChat", true);
+  if (config.get("monitorCodexLog", true)) return;
   if (!enabled) return;
 
   const idleMsRaw = config.get("codexChatIdleMs", 1800);
@@ -807,10 +1175,6 @@ function startCodexDocumentWatcher(context) {
     touchDocument(event.document);
   });
 
-  debugDocWatcher = vscode.workspace.onDidOpenTextDocument((doc) => {
-    logDebug(`document opened: scheme=${doc.uri.scheme} uri=${doc.uri.toString()}`);
-  });
-
   // Polling catches Codex custom-editor updates that may not emit normal text change events.
   codexPoller = setInterval(async () => {
     const docs = vscode.workspace.textDocuments.filter((d) => isLikelyCodexDocument(d));
@@ -822,7 +1186,6 @@ function startCodexDocumentWatcher(context) {
   }, pollMs);
 
   context.subscriptions.push(codexDocWatcher);
-  context.subscriptions.push(debugDocWatcher);
   context.subscriptions.push({ dispose: () => { if (codexPoller) clearInterval(codexPoller); codexPoller = null; } });
   context.subscriptions.push({ dispose: stopCodexDocumentWatcher });
 }
@@ -855,9 +1218,9 @@ function startWatcher(_context) {
           if (!trimmed) return;
 
           if (trimmed.includes("error")) {
-            await notify("error", "Codex: task error", { mode: "manual" });
+            await notify("error", "Codex could not complete the task. Click to return to this conversation.", { mode: "manual" });
           } else {
-            await notify("complete", "Codex: response complete", { mode: "manual" });
+            await notify("complete", "Codex has finished responding. Click to return to this conversation.", { mode: "manual" });
           }
         } catch {
           // noop
@@ -921,9 +1284,9 @@ function startWatcher(_context) {
             if (!trimmed) return;
 
             if (trimmed.includes("error")) {
-              await notify("error", "Codex: task error", { mode: "manual" });
+            await notify("error", "Codex could not complete the task. Click to return to this conversation.", { mode: "manual" });
             } else {
-              await notify("complete", "Codex: response complete", { mode: "manual" });
+            await notify("complete", "Codex has finished responding. Click to return to this conversation.", { mode: "manual" });
             }
           } catch {
             // The trigger file is optional and may not exist yet.
@@ -997,37 +1360,47 @@ async function maybeShowPostUpdateReloadHint(context) {
 
 // Extension activation: register commands, config change handlers, and watchers.
 function activate(context) {
+  if (process.platform === "win32" && getConfig().get("focusExistingWindowOnToast", false)) {
+    void installWindowsToastFocusHelper(context).catch((error) => {
+      logDebug(`toast focus helper registration failed error=${String(error?.message || error)}`);
+    });
+    const refreshToastWindowTarget = () => {
+      registerFocusedWindowsToastTarget();
+      setTimeout(() => registerFocusedWindowsToastTarget(), 250);
+    };
+    refreshToastWindowTarget();
+    context.subscriptions.push(vscode.window.onDidChangeWindowState((state) => {
+      if (state.focused) refreshToastWindowTarget();
+    }));
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexNotifier.enableToastWindowFocus", async () => {
+      try {
+        await installWindowsToastFocusHelper(context);
+        await getConfig().update("focusExistingWindowOnToast", true, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage("Codex Notifier: toast window focus enabled.");
+      } catch (error) {
+        vscode.window.showErrorMessage(`Codex Notifier: could not enable toast window focus: ${error.message || error}`);
+      }
+    })
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand("codexNotifier.notifyComplete", async () => {
-      await notify("complete", "Codex: response complete", { mode: "manual" });
+      await notify("complete", "Codex has finished responding. Click to return to this conversation.", { mode: "manual" });
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("codexNotifier.notifyError", async () => {
-      await notify("error", "Codex: task error", { mode: "manual" });
+      await notify("error", "Codex could not complete the task. Click to return to this conversation.", { mode: "manual" });
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("codexNotifier.testSound", async () => {
       await notify("complete", "Codex Notifier: test sound", { mode: "manual" });
-    })
-  );
-
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand("codexNotifier.debugSnapshot", async () => {
-      const docs = vscode.workspace.textDocuments.map((d) => `${d.uri.scheme} :: ${d.uri.toString()}`);
-      const editors = vscode.window.visibleTextEditors.map((e) => `${e.document.uri.scheme} :: ${e.document.uri.toString()}`);
-      const out = getOutput();
-      out.appendLine("===== Snapshot =====");
-      out.appendLine(`docs(${docs.length})`);
-      docs.forEach((d) => out.appendLine(`  ${d}`));
-      out.appendLine(`visibleEditors(${editors.length})`);
-      editors.forEach((e) => out.appendLine(`  ${e}`));
-      out.show(true);
-      vscode.window.showInformationMessage("Codex Notifier: debug snapshot written to output.");
     })
   );
 

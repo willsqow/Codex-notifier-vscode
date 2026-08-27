@@ -33,16 +33,16 @@
         "title": "Codex Notifier: Test Sound"
       },
       {
-        "command": "codexNotifier.debugSnapshot",
-        "title": "Codex Notifier: Debug Snapshot"
-      },
-      {
         "command": "codexNotifier.toggleAutoNotify",
         "title": "Codex Notifier: Toggle Auto Notify"
       },
       {
         "command": "codexNotifier.showDiagnostics",
         "title": "Codex Notifier: Show Diagnostics"
+      },
+      {
+        "command": "codexNotifier.enableToastWindowFocus",
+        "title": "Codex Notifier: Enable Toast Window Focus (Windows)"
       }
     ],
     "keybindings": [
@@ -79,6 +79,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show system notifications when VS Code is not focused."
+        },
+        "codexNotifier.focusExistingWindowOnToast": {
+          "type": "boolean",
+          "default": false,
+          "description": "On Windows, make toast clicks focus a matching existing VS Code workspace window. Requires enabling the Windows helper command once."
         },
         "codexNotifier.popupDurationMs": {
           "type": "number",
@@ -136,11 +141,6 @@
           "minimum": 250,
           "description": "Polling interval for Codex chat session document activity detection."
         },
-        "codexNotifier.debug": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable debug logging to the Codex Notifier output channel."
-        },
         "codexNotifier.monitorCodexLog": {
           "type": "boolean",
           "default": true,
@@ -171,7 +171,7 @@
     "ci": "npm run check && npm run lint && npm test && npm run package:test",
     "package:test": "node ./scripts/test-vsix.js",
     "release:check": "npm run check && npm run lint && npm test && npm run package:test",
-    "test": "node ./scripts/test-session-events.js"
+    "test": "node ./scripts/test-session-events.js && node ./scripts/test-toast-focus.js"
   },
   "devDependencies": {
     "adm-zip": "^0.5.16",
