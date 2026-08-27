@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.1.11] - 2026-08-28
 
 - Added opt-in Windows toast click focus for the exact VS Code window that owns a Codex prompt.
 - Added native per-window HWND registration and a hidden `codex-notifier://` activation helper so clicking a toast restores an existing VS Code window without opening a new one or flashing a PowerShell window.
