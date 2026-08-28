@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.12] - 2026-08-28
+
+- Fixed Windows toast clicks defaulting to a new VS Code window. Existing-window focus now enables automatically, so toast activation uses the `codex-notifier://` helper instead of VS Code's default launcher.
+
 ## [0.1.11] - 2026-08-28
 
 - Added opt-in Windows toast click focus for the exact VS Code window that owns a Codex prompt.

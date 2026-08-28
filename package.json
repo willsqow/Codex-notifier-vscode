@@ -2,7 +2,7 @@
   "name": "codex-notifier",
   "displayName": "Codex Notifier",
   "description": "Notify with sound when work is complete.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "icon": "logo.png",
   "publisher": "zis3c",
   "engines": {
@@ -82,8 +82,8 @@
         },
         "codexNotifier.focusExistingWindowOnToast": {
           "type": "boolean",
-          "default": false,
-          "description": "On Windows, make toast clicks focus a matching existing VS Code workspace window. Requires enabling the Windows helper command once."
+          "default": true,
+          "description": "On Windows, make toast clicks focus a matching existing VS Code workspace window. The helper registers automatically."
         },
         "codexNotifier.popupDurationMs": {
           "type": "number",

@@ -61,7 +61,7 @@ Direct Marketplace link:
 
 ### Windows Toast Click Focus
 
-To make a Windows toast return to its matching VS Code window, run `Codex Notifier: Enable Toast Window Focus (Windows)` once from the Command Palette. This registers a per-user `codex-notifier://` protocol that starts the bundled focus helper when a toast is clicked.
+On Windows, v0.1.12 automatically registers the per-user `codex-notifier://` protocol that starts the bundled focus helper when a toast is clicked. Run `Codex Notifier: Enable Toast Window Focus (Windows)` only to repair a missing protocol registration.
 
 The helper records the native target of each VS Code window and matches toast ownership by Codex session and turn. This also supports the same existing chat being open in multiple windows. If an exact target cannot be verified, it does nothing instead of focusing the wrong window.
 
@@ -124,7 +124,7 @@ For safer auto-detection defaults:
   - Increase `codexNotifier.codexChatCooldownMs`.
 
 - **Toast opens the wrong window or does nothing**
-  - Run `Codex Notifier: Enable Toast Window Focus (Windows)` once.
+  - Run `Codex Notifier: Enable Toast Window Focus (Windows)` to repair protocol registration.
   - Reload or restart all VS Code windows after installing the VSIX.
   - Test with a new prompt in the existing chat so the current turn gets a fresh window target.
   - Use `Codex Notifier: Show Diagnostics` if the issue remains.

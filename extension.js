@@ -525,7 +525,7 @@ async function notify(kind, message, _options = {}) {
   const volume = Number.isFinite(volumeRaw) ? Math.max(0, Math.min(1, volumeRaw)) : 1;
   const completeSoundPath = config.get("completeSoundPath", "");
   const errorSoundPath = config.get("errorSoundPath", "");
-  const focusExistingWindowOnToast = config.get("focusExistingWindowOnToast", false);
+  const focusExistingWindowOnToast = config.get("focusExistingWindowOnToast", true);
   if (focusExistingWindowOnToast) registerFocusedWindowsToastTarget();
   const notificationTitle = kind === "error"
     ? "Codex task error"
@@ -1360,7 +1360,7 @@ async function maybeShowPostUpdateReloadHint(context) {
 
 // Extension activation: register commands, config change handlers, and watchers.
 function activate(context) {
-  if (process.platform === "win32" && getConfig().get("focusExistingWindowOnToast", false)) {
+  if (process.platform === "win32" && getConfig().get("focusExistingWindowOnToast", true)) {
     void installWindowsToastFocusHelper(context).catch((error) => {
       logDebug(`toast focus helper registration failed error=${String(error?.message || error)}`);
     });

@@ -1,7 +1,13 @@
 "use strict";
 
 const assert = require("assert");
+const packageJson = require("../package.json");
 const { buildToastFocusLaunchUri } = require("../toast-focus");
+
+const focusSetting = packageJson.contributes.configuration.properties[
+  "codexNotifier.focusExistingWindowOnToast"
+];
+assert.strictEqual(focusSetting.default, true);
 
 const launchUri = buildToastFocusLaunchUri({
   workspaceName: "Codex Notifier",

@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=zis3c.codex-notifier">
-    <img src="https://img.shields.io/badge/Marketplace-0.1.11-007ACC?style=flat-square&logo=visualstudiocode&logoColor=white" alt="VS Code Marketplace Version" />
+    <img src="https://img.shields.io/badge/Marketplace-0.1.12-007ACC?style=flat-square&logo=visualstudiocode&logoColor=white" alt="VS Code Marketplace Version" />
   </a>
   <a href="https://marketplace.visualstudio.com/items?itemName=zis3c.codex-notifier">
     <img src="https://img.shields.io/badge/Installs-1K%2B-2ea44f?style=flat-square" alt="VS Code Marketplace Installs" />
@@ -82,7 +82,7 @@ See [INSTALLATION.md](./INSTALLATION.md) for VSIX steps.
 
 ### Windows Toast Click Focus
 
-On Windows, run `Codex Notifier: Enable Toast Window Focus (Windows)` once. The extension records the native window target when each VS Code window is focused. Each notification stores its target by Codex session and turn, so clicking a toast returns to the window that sent that prompt, even when several windows use the same existing chat. The helper is fail-safe: if it cannot identify the exact window, it does nothing instead of focusing a different window.
+On Windows, v0.1.12 enables toast window focus automatically. The extension records the native window target when each VS Code window is focused. Each notification stores its target by Codex session and turn, so clicking a toast returns to the window that sent that prompt, even when several windows use the same existing chat. The helper is fail-safe: if it cannot identify the exact window, it does nothing instead of focusing a different window. Run `Codex Notifier: Enable Toast Window Focus (Windows)` only to repair a missing protocol registration.
 
 ## How It Works
 
